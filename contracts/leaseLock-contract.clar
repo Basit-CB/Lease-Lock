@@ -88,8 +88,8 @@
 )
 
 ;; Helper function to get current block height as days (approximation)
-(define-private (block-height-to-days (current-block-height uint))
-  (/ current-block-height u144) ;; Assuming ~144 blocks per day
+(define-private (block-height-to-days (block-height uint))
+  (/ block-height u144) ;; Assuming ~144 blocks per day
 )
 
 ;; Helper function to convert days to block height
@@ -158,4 +158,122 @@
 )
 
 ;; public functions
-;;
+
+;; Create a new lease agreement
+;; @param lessee: The person who will lease the equipment
+;; @param asset-description: Description of the asset being leased
+;; @param monthly-payment: Monthly payment in micro-STX
+;; @param lease-duration: Duration of lease in days
+;; @param security-deposit: Security deposit amount
+(define-public (create-lease 
+    (lessee principal)
+    (asset-description (string-utf8 256))
+    (monthly-payment uint)
+    (lease-duration uint)
+    (security-deposit uint))
+  (let ((lease-id (var-get next-lease-id))
+        (lessor tx-sender))
+    ;; Validate inputs
+    (asserts! (not (var-get contract-paused)) ERR_UNAUTHORIZED)
+    (asserts! (validate-lease-terms lease-duration monthly-payment security-deposit) ERR_INVALID_TERMS)
+    (asserts! (not (is-eq lessor lessee)) ERR_INVALID_TERMS)
+    
+    ;; Create the lease
+    (map-set leases 
+      { lease-id: lease-id }
+      {
+        lessor: lessor,
+        lessee: lessee,
+        asset-description: asset-description,
+        monthly-payment: monthly-payment,
+        lease-start: block-height,
+        lease-duration: lease-duration,
+        total-payments: (/ lease-duration u30), ;; Approximate monthly payments
+        payments-made: u0,
+        status: STATUS_ACTIVE,
+        security-deposit: security-deposit,
+        late-fee: u0,
+        next-payment-due: (+ block-height (days-to-block-height u30))
+      }
+    )
+    
+    ;; Update contract state
+    (var-set next-lease-id (+ lease-id u1))
+    (var-set total-active-leases (+ (var-get total-active-leases) u1))
+    (update-lessor-stats lessor true)
+    
+    (ok lease-id)
+  )
+)
+
+;; Make a lease payment
+;; @param lease-id: ID of the lease
+(define-public (make-payment (lease-id uint))
+  (let ((lease-data (unwrap! (map-get? leases { lease-id: lease-id }) ERR_LEASE_NOT_FOUND))
+        (payer tx-sender)
+        (payment-number (+ (get payments-made lease-data) u1))
+        (is-late (is-payment-late lease-id))
+        (days-late (calculate-days-late lease-id))
+        (late-fee (if is-late (calculate-late-fee (get monthly-payment lease-data) days-late) u0)))
+    
+    ;; Validate payment
+    (asserts! (is-eq payer (get lessee lease-data)) ERR_UNAUTHORIZED)
+    (asserts! (is-eq (get status lease-data) STATUS_ACTIVE) ERR_LEASE_TERMINATED)
+    (asserts! (< (get payments-made lease-data) (get total-payments lease-data)) ERR_LEASE_EXPIRED)
+    
+    ;; Record payment in history
+    (map-set payment-history
+      { lease-id: lease-id, payment-number: payment-number }
+      {
+        amount: (get monthly-payment lease-data),
+        payment-date: block-height,
+        late-fee: late-fee,
+        is-late: is-late
+      }
+    )
+    
+    ;; Update lease record
+    (map-set leases 
+      { lease-id: lease-id }
+      (merge lease-data {
+        payments-made: payment-number,
+        late-fee: (+ (get late-fee lease-data) late-fee),
+        next-payment-due: (+ (get next-payment-due lease-data) (days-to-block-height u30)),
+        status: (if (is-eq payment-number (get total-payments lease-data)) STATUS_COMPLETED STATUS_ACTIVE)
+      })
+    )
+    
+    ;; Update active leases count if lease is completed
+    (if (is-eq payment-number (get total-payments lease-data))
+      (var-set total-active-leases (- (var-get total-active-leases) u1))
+      true
+    )
+    
+    (ok { payment-made: (get monthly-payment lease-data), late-fee: late-fee })
+  )
+)
+
+;; Get lease details
+;; @param lease-id: ID of the lease to query
+(define-read-only (get-lease-details (lease-id uint))
+  (map-get? leases { lease-id: lease-id })
+)
+
+;; Get payment history for a lease
+;; @param lease-id: ID of the lease
+;; @param payment-number: Specific payment number to query
+(define-read-only (get-payment-details (lease-id uint) (payment-number uint))
+  (map-get? payment-history { lease-id: lease-id, payment-number: payment-number })
+)
+
+;; Check if a lease payment is overdue
+;; @param lease-id: ID of the lease to check
+(define-read-only (is-lease-overdue (lease-id uint))
+  (match (map-get? leases { lease-id: lease-id })
+    lease-data 
+      (and 
+        (is-eq (get status lease-data) STATUS_ACTIVE)
+        (> block-height (+ (get next-payment-due lease-data) (days-to-block-height GRACE_PERIOD))))
+    false
+  )
+)
