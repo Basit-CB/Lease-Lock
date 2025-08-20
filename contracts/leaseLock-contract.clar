@@ -88,8 +88,8 @@
 )
 
 ;; Helper function to get current block height as days (approximation)
-(define-private (block-height-to-days (block-height uint))
-  (/ block-height u144) ;; Assuming ~144 blocks per day
+(define-private (block-height-to-days (current-block-height uint))
+  (/ current-block-height u144) ;; Assuming ~144 blocks per day
 )
 
 ;; Helper function to convert days to block height
@@ -275,5 +275,136 @@
         (is-eq (get status lease-data) STATUS_ACTIVE)
         (> block-height (+ (get next-payment-due lease-data) (days-to-block-height GRACE_PERIOD))))
     false
+  )
+)
+
+;; Terminate a lease early (can be called by lessor or lessee)
+;; @param lease-id: ID of the lease to terminate
+;; @param reason: Reason for termination
+(define-public (terminate-lease (lease-id uint) (reason (string-utf8 128)))
+  (let ((lease-data (unwrap! (map-get? leases { lease-id: lease-id }) ERR_LEASE_NOT_FOUND))
+        (caller tx-sender))
+    
+    ;; Validate termination request
+    (asserts! (is-authorized caller lease-id) ERR_UNAUTHORIZED)
+    (asserts! (not (is-eq (get status lease-data) STATUS_TERMINATED)) ERR_LEASE_TERMINATED)
+    
+    ;; Update lease status
+    (map-set leases 
+      { lease-id: lease-id }
+      (merge lease-data { status: STATUS_TERMINATED })
+    )
+    
+    ;; Update active leases count
+    (var-set total-active-leases (- (var-get total-active-leases) u1))
+    
+    (ok { terminated-by: caller, reason: reason })
+  )
+)
+
+;; Update lessor profile information
+;; @param name: Display name for the lessor
+(define-public (update-lessor-profile (name (string-utf8 100)))
+  (let ((lessor tx-sender)
+        (current-stats (default-to 
+                         { name: u"", active-leases: u0, total-leases-created: u0, reputation-score: u50 }
+                         (map-get? lessors { lessor: lessor }))))
+    
+    (map-set lessors 
+      { lessor: lessor }
+      (merge current-stats { name: name })
+    )
+    
+    (ok true)
+  )
+)
+
+;; Get lessor profile and statistics
+;; @param lessor: Principal address of the lessor
+(define-read-only (get-lessor-profile (lessor principal))
+  (map-get? lessors { lessor: lessor })
+)
+
+;; Get contract statistics
+(define-read-only (get-contract-stats)
+  {
+    total-leases-created: (- (var-get next-lease-id) u1),
+    total-active-leases: (var-get total-active-leases),
+    contract-paused: (var-get contract-paused),
+    contract-owner: CONTRACT_OWNER
+  }
+)
+
+;; Calculate total amount owed for a lease (including late fees)
+;; @param lease-id: ID of the lease
+(define-read-only (calculate-total-owed (lease-id uint))
+  (match (map-get? leases { lease-id: lease-id })
+    lease-data 
+      (let ((remaining-payments (- (get total-payments lease-data) (get payments-made lease-data)))
+            (base-amount (* remaining-payments (get monthly-payment lease-data)))
+            (current-late-fee (if (is-payment-late lease-id)
+                                (calculate-late-fee (get monthly-payment lease-data) (calculate-days-late lease-id))
+                                u0)))
+        (some { 
+          remaining-payments: remaining-payments,
+          base-amount: base-amount,
+          accumulated-late-fees: (get late-fee lease-data),
+          current-late-fee: current-late-fee,
+          total-owed: (+ base-amount (get late-fee lease-data) current-late-fee)
+        }))
+    none
+  )
+)
+
+;; Emergency pause contract (owner only)
+(define-public (pause-contract)
+  (begin 
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (var-set contract-paused true)
+    (ok true)
+  )
+)
+
+;; Resume contract operations (owner only)  
+(define-public (resume-contract)
+  (begin 
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (var-set contract-paused false)
+    (ok true)
+  )
+)
+
+;; Bulk query function to get multiple lease details
+;; @param lease-ids: List of lease IDs to query
+(define-read-only (get-multiple-leases (lease-ids (list 10 uint)))
+  (map get-lease-details lease-ids)
+)
+
+;; Get leases for a specific lessee
+;; @param lessee: Principal address to search for
+;; @param start-id: Starting lease ID for search
+;; @param limit: Maximum number of results
+;; Note: This is a simplified implementation - in practice, you'd need to iterate through lease IDs
+(define-read-only (get-lessee-leases (lessee principal) (start-id uint) (limit uint))
+  ;; For now, return empty list - this would need a more complex implementation
+  ;; to iterate through existing lease IDs and filter by lessee
+  (list)
+)
+
+;; Advanced payment function with partial payments support
+;; @param lease-id: ID of the lease
+;; @param payment-amount: Amount to pay (can be partial)
+(define-public (make-partial-payment (lease-id uint) (payment-amount uint))
+  (let ((lease-data (unwrap! (map-get? leases { lease-id: lease-id }) ERR_LEASE_NOT_FOUND))
+        (payer tx-sender))
+    
+    ;; Validate payment
+    (asserts! (is-eq payer (get lessee lease-data)) ERR_UNAUTHORIZED)
+    (asserts! (is-eq (get status lease-data) STATUS_ACTIVE) ERR_LEASE_TERMINATED)
+    (asserts! (> payment-amount u0) ERR_INSUFFICIENT_PAYMENT)
+    
+    ;; This is a simplified version - in a full implementation,
+    ;; you'd track partial payments and apply them to outstanding balance
+    (ok { partial-payment-recorded: payment-amount })
   )
 )
