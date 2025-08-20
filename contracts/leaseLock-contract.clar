@@ -88,8 +88,8 @@
 )
 
 ;; Helper function to get current block height as days (approximation)
-(define-private (block-height-to-days (block-height uint))
-  (/ block-height u144) ;; Assuming ~144 blocks per day
+(define-private (block-height-to-days (current-block-height uint))
+  (/ current-block-height u144) ;; Assuming ~144 blocks per day
 )
 
 ;; Helper function to convert days to block height
