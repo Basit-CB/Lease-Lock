@@ -73,3 +73,89 @@
     reputation-score: uint       ;; Simple reputation system (0-100)
   }
 )
+
+;; private functions
+;; Helper function to calculate late fees based on days overdue
+(define-private (calculate-late-fee (payment-amount uint) (days-late uint))
+  (let ((daily-penalty (/ (* payment-amount PENALTY_RATE) u100)))
+    (* daily-penalty days-late)
+  )
+)
+
+;; Helper function to check if a lease exists
+(define-private (lease-exists (lease-id uint))
+  (is-some (map-get? leases { lease-id: lease-id }))
+)
+
+;; Helper function to get current block height as days (approximation)
+(define-private (block-height-to-days (block-height uint))
+  (/ block-height u144) ;; Assuming ~144 blocks per day
+)
+
+;; Helper function to convert days to block height
+(define-private (days-to-block-height (days uint))
+  (* days u144)
+)
+
+;; Helper function to check if payment is late
+(define-private (is-payment-late (lease-id uint))
+  (match (map-get? leases { lease-id: lease-id })
+    lease-data (> block-height (get next-payment-due lease-data))
+    false
+  )
+)
+
+;; Helper function to calculate days late for a payment
+(define-private (calculate-days-late (lease-id uint))
+  (match (map-get? leases { lease-id: lease-id })
+    lease-data 
+      (if (> block-height (get next-payment-due lease-data))
+        (block-height-to-days (- block-height (get next-payment-due lease-data)))
+        u0)
+    u0
+  )
+)
+
+;; Helper function to update lessor statistics
+(define-private (update-lessor-stats (lessor principal) (increment-active bool))
+  (let ((current-stats (default-to 
+                         { name: u"", active-leases: u0, total-leases-created: u0, reputation-score: u50 }
+                         (map-get? lessors { lessor: lessor }))))
+    (map-set lessors 
+      { lessor: lessor }
+      {
+        name: (get name current-stats),
+        active-leases: (if increment-active 
+                        (+ (get active-leases current-stats) u1)
+                        (get active-leases current-stats)),
+        total-leases-created: (+ (get total-leases-created current-stats) u1),
+        reputation-score: (get reputation-score current-stats)
+      }
+    )
+    true
+  )
+)
+
+;; Helper function to validate lease terms
+(define-private (validate-lease-terms (duration uint) (monthly-payment uint) (security-deposit uint))
+  (and 
+    (>= duration MIN_LEASE_DURATION)
+    (<= duration MAX_LEASE_DURATION)
+    (> monthly-payment u0)
+    (>= security-deposit (* monthly-payment u1)) ;; Security deposit at least 1 month rent
+  )
+)
+
+;; Helper function to check contract authorization
+(define-private (is-authorized (caller principal) (lease-id uint))
+  (match (map-get? leases { lease-id: lease-id })
+    lease-data (or 
+                 (is-eq caller (get lessor lease-data))
+                 (is-eq caller (get lessee lease-data))
+                 (is-eq caller CONTRACT_OWNER))
+    false
+  )
+)
+
+;; public functions
+;;
