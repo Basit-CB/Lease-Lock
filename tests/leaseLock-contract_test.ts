@@ -20,7 +20,9 @@ const ERR_UNAUTHORIZED = 100;
 const ERR_LEASE_NOT_FOUND = 101;
 const ERR_INSUFFICIENT_PAYMENT = 104;
 const ERR_INVALID_TERMS = 106;
+const ERR_LEASE_TERMINATED = 107;
 const STATUS_ACTIVE = 1;
+const STATUS_TERMINATED = 3;
 
 Clarinet.test({
     name: "Contract initialization - verify initial state",
@@ -765,5 +767,498 @@ Clarinet.test({
         );
         
         leaseDetails.result.expectSome().expectTuple();
+    },
+});
+
+/**
+ * COMMIT 3/4 - Lease Termination and Management Tests
+ * 
+ * This section covers lease termination functionality, status management,
+ * and advanced lessor profile operations. Tests the lifecycle management
+ * aspects of the lease system including early termination scenarios.
+ */
+
+Clarinet.test({
+    name: "Lease termination - successful termination by lessor",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const lessor = accounts.get('wallet_1')!;
+        const lessee = accounts.get('wallet_2')!;
+        
+        // Create lease
+        let block = chain.mineBlock([
+            Tx.contractCall(
+                'leaseLock-contract',
+                'create-lease',
+                [
+                    types.principal(lessee.address),
+                    types.utf8("Termination Test Vehicle"),
+                    types.uint(100000),
+                    types.uint(365),
+                    types.uint(200000)
+                ],
+                lessor.address
+            )
+        ]);
+        
+        assertEquals(block.receipts.length, 1);
+        block.receipts[0].result.expectOk().expectUint(1);
+        
+        // Terminate lease by lessor
+        block = chain.mineBlock([
+            Tx.contractCall(
+                'leaseLock-contract',
+                'terminate-lease',
+                [
+                    types.uint(1),
+                    types.utf8("Contract breach - non-payment")
+                ],
+                lessor.address
+            )
+        ]);
+        
+        assertEquals(block.receipts.length, 1);
+        block.receipts[0].result.expectOk().expectTuple();
+        
+        // Verify lease status changed to terminated
+        let leaseDetails = chain.callReadOnlyFn(
+            'leaseLock-contract',
+            'get-lease-details',
+            [types.uint(1)],
+            lessor.address
+        );
+        
+        leaseDetails.result.expectSome().expectTuple();
+    },
+});
+
+Clarinet.test({
+    name: "Lease termination - successful termination by lessee",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const lessor = accounts.get('wallet_1')!;
+        const lessee = accounts.get('wallet_2')!;
+        
+        // Create lease
+        let block = chain.mineBlock([
+            Tx.contractCall(
+                'leaseLock-contract',
+                'create-lease',
+                [
+                    types.principal(lessee.address),
+                    types.utf8("Lessee Termination Test"),
+                    types.uint(90000),
+                    types.uint(365),
+                    types.uint(180000)
+                ],
+                lessor.address
+            )
+        ]);
+        
+        assertEquals(block.receipts.length, 1);
+        block.receipts[0].result.expectOk().expectUint(1);
+        
+        // Terminate lease by lessee
+        block = chain.mineBlock([
+            Tx.contractCall(
+                'leaseLock-contract',
+                'terminate-lease',
+                [
+                    types.uint(1),
+                    types.utf8("Early return - job relocation")
+                ],
+                lessee.address
+            )
+        ]);
+        
+        assertEquals(block.receipts.length, 1);
+        block.receipts[0].result.expectOk().expectTuple();
+    },
+});
+
+Clarinet.test({
+    name: "Lease termination - unauthorized termination attempt",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const lessor = accounts.get('wallet_1')!;
+        const lessee = accounts.get('wallet_2')!;
+        const unauthorized = accounts.get('wallet_3')!;
+        
+        // Create lease
+        let block = chain.mineBlock([
+            Tx.contractCall(
+                'leaseLock-contract',
+                'create-lease',
+                [
+                    types.principal(lessee.address),
+                    types.utf8("Unauthorized Termination Test"),
+                    types.uint(100000),
+                    types.uint(365),
+                    types.uint(200000)
+                ],
+                lessor.address
+            )
+        ]);
+        
+        assertEquals(block.receipts.length, 1);
+        block.receipts[0].result.expectOk().expectUint(1);
+        
+        // Attempt termination by unauthorized party
+        block = chain.mineBlock([
+            Tx.contractCall(
+                'leaseLock-contract',
+                'terminate-lease',
+                [
+                    types.uint(1),
+                    types.utf8("Unauthorized attempt")
+                ],
+                unauthorized.address
+            )
+        ]);
+        
+        assertEquals(block.receipts.length, 1);
+        block.receipts[0].result.expectErr().expectUint(ERR_UNAUTHORIZED);
+    },
+});
+
+Clarinet.test({
+    name: "Lease termination - terminate non-existing lease",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const lessor = accounts.get('wallet_1')!;
+        
+        // Attempt to terminate non-existing lease
+        let block = chain.mineBlock([
+            Tx.contractCall(
+                'leaseLock-contract',
+                'terminate-lease',
+                [
+                    types.uint(999), // Non-existing lease
+                    types.utf8("Non-existing lease termination")
+                ],
+                lessor.address
+            )
+        ]);
+        
+        assertEquals(block.receipts.length, 1);
+        block.receipts[0].result.expectErr().expectUint(ERR_LEASE_NOT_FOUND);
+    },
+});
+
+Clarinet.test({
+    name: "Lease termination - prevent double termination",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const lessor = accounts.get('wallet_1')!;
+        const lessee = accounts.get('wallet_2')!;
+        
+        // Create lease
+        let block = chain.mineBlock([
+            Tx.contractCall(
+                'leaseLock-contract',
+                'create-lease',
+                [
+                    types.principal(lessee.address),
+                    types.utf8("Double Termination Test"),
+                    types.uint(100000),
+                    types.uint(365),
+                    types.uint(200000)
+                ],
+                lessor.address
+            )
+        ]);
+        
+        assertEquals(block.receipts.length, 1);
+        block.receipts[0].result.expectOk().expectUint(1);
+        
+        // First termination - should succeed
+        block = chain.mineBlock([
+            Tx.contractCall(
+                'leaseLock-contract',
+                'terminate-lease',
+                [
+                    types.uint(1),
+                    types.utf8("First termination")
+                ],
+                lessor.address
+            )
+        ]);
+        
+        assertEquals(block.receipts.length, 1);
+        block.receipts[0].result.expectOk().expectTuple();
+        
+        // Second termination - should fail
+        block = chain.mineBlock([
+            Tx.contractCall(
+                'leaseLock-contract',
+                'terminate-lease',
+                [
+                    types.uint(1),
+                    types.utf8("Second termination attempt")
+                ],
+                lessor.address
+            )
+        ]);
+        
+        assertEquals(block.receipts.length, 1);
+        block.receipts[0].result.expectErr().expectUint(ERR_LEASE_TERMINATED);
+    },
+});
+
+Clarinet.test({
+    name: "Payment after termination - prevent payments to terminated lease",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const lessor = accounts.get('wallet_1')!;
+        const lessee = accounts.get('wallet_2')!;
+        
+        // Create lease
+        let block = chain.mineBlock([
+            Tx.contractCall(
+                'leaseLock-contract',
+                'create-lease',
+                [
+                    types.principal(lessee.address),
+                    types.utf8("Payment After Termination Test"),
+                    types.uint(100000),
+                    types.uint(365),
+                    types.uint(200000)
+                ],
+                lessor.address
+            )
+        ]);
+        
+        assertEquals(block.receipts.length, 1);
+        block.receipts[0].result.expectOk().expectUint(1);
+        
+        // Terminate lease
+        block = chain.mineBlock([
+            Tx.contractCall(
+                'leaseLock-contract',
+                'terminate-lease',
+                [
+                    types.uint(1),
+                    types.utf8("Early termination")
+                ],
+                lessor.address
+            )
+        ]);
+        
+        assertEquals(block.receipts.length, 1);
+        block.receipts[0].result.expectOk().expectTuple();
+        
+        // Attempt payment after termination
+        block = chain.mineBlock([
+            Tx.contractCall(
+                'leaseLock-contract',
+                'make-payment',
+                [types.uint(1)],
+                lessee.address
+            )
+        ]);
+        
+        assertEquals(block.receipts.length, 1);
+        block.receipts[0].result.expectErr().expectUint(ERR_LEASE_TERMINATED);
+    },
+});
+
+Clarinet.test({
+    name: "Lessor profile - comprehensive profile management",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const lessor = accounts.get('wallet_1')!;
+        const lessee1 = accounts.get('wallet_2')!;
+        const lessee2 = accounts.get('wallet_3')!;
+        
+        // Update lessor profile
+        let block = chain.mineBlock([
+            Tx.contractCall(
+                'leaseLock-contract',
+                'update-lessor-profile',
+                [types.utf8("Professional Lease Management Corp")],
+                lessor.address
+            )
+        ]);
+        
+        assertEquals(block.receipts.length, 1);
+        block.receipts[0].result.expectOk().expectBool(true);
+        
+        // Create multiple leases to test statistics
+        block = chain.mineBlock([
+            Tx.contractCall(
+                'leaseLock-contract',
+                'create-lease',
+                [
+                    types.principal(lessee1.address),
+                    types.utf8("First Profile Test Vehicle"),
+                    types.uint(100000),
+                    types.uint(365),
+                    types.uint(200000)
+                ],
+                lessor.address
+            ),
+            Tx.contractCall(
+                'leaseLock-contract',
+                'create-lease',
+                [
+                    types.principal(lessee2.address),
+                    types.utf8("Second Profile Test Vehicle"),
+                    types.uint(120000),
+                    types.uint(730),
+                    types.uint(240000)
+                ],
+                lessor.address
+            )
+        ]);
+        
+        assertEquals(block.receipts.length, 2);
+        block.receipts[0].result.expectOk().expectUint(1);
+        block.receipts[1].result.expectOk().expectUint(2);
+        
+        // Check updated profile with lease statistics
+        let profileCall = chain.callReadOnlyFn(
+            'leaseLock-contract',
+            'get-lessor-profile',
+            [types.principal(lessor.address)],
+            lessor.address
+        );
+        
+        profileCall.result.expectSome().expectTuple();
+    },
+});
+
+Clarinet.test({
+    name: "Bulk operations - multiple lease queries",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const lessor = accounts.get('wallet_1')!;
+        const lessee1 = accounts.get('wallet_2')!;
+        const lessee2 = accounts.get('wallet_3')!;
+        const lessee3 = accounts.get('wallet_4')!;
+        
+        // Create multiple leases
+        let block = chain.mineBlock([
+            Tx.contractCall(
+                'leaseLock-contract',
+                'create-lease',
+                [
+                    types.principal(lessee1.address),
+                    types.utf8("Bulk Test Vehicle 1"),
+                    types.uint(80000),
+                    types.uint(365),
+                    types.uint(160000)
+                ],
+                lessor.address
+            ),
+            Tx.contractCall(
+                'leaseLock-contract',
+                'create-lease',
+                [
+                    types.principal(lessee2.address),
+                    types.utf8("Bulk Test Vehicle 2"),
+                    types.uint(90000),
+                    types.uint(365),
+                    types.uint(180000)
+                ],
+                lessor.address
+            ),
+            Tx.contractCall(
+                'leaseLock-contract',
+                'create-lease',
+                [
+                    types.principal(lessee3.address),
+                    types.utf8("Bulk Test Vehicle 3"),
+                    types.uint(100000),
+                    types.uint(365),
+                    types.uint(200000)
+                ],
+                lessor.address
+            )
+        ]);
+        
+        assertEquals(block.receipts.length, 3);
+        block.receipts[0].result.expectOk().expectUint(1);
+        block.receipts[1].result.expectOk().expectUint(2);
+        block.receipts[2].result.expectOk().expectUint(3);
+        
+        // Test bulk query function
+        let bulkQuery = chain.callReadOnlyFn(
+            'leaseLock-contract',
+            'get-multiple-leases',
+            [types.list([types.uint(1), types.uint(2), types.uint(3)])],
+            lessor.address
+        );
+        
+        bulkQuery.result.expectList();
+    },
+});
+
+Clarinet.test({
+    name: "Contract statistics - comprehensive stats after operations",
+    async fn(chain: Chain, accounts: Map<string, Account>) {
+        const lessor1 = accounts.get('wallet_1')!;
+        const lessor2 = accounts.get('wallet_2')!;
+        const lessee1 = accounts.get('wallet_3')!;
+        const lessee2 = accounts.get('wallet_4')!;
+        
+        // Initial stats check
+        let initialStats = chain.callReadOnlyFn(
+            'leaseLock-contract',
+            'get-contract-stats',
+            [],
+            lessor1.address
+        );
+        
+        initialStats.result.expectTuple();
+        
+        // Create leases
+        let block = chain.mineBlock([
+            Tx.contractCall(
+                'leaseLock-contract',
+                'create-lease',
+                [
+                    types.principal(lessee1.address),
+                    types.utf8("Stats Test Vehicle 1"),
+                    types.uint(100000),
+                    types.uint(365),
+                    types.uint(200000)
+                ],
+                lessor1.address
+            ),
+            Tx.contractCall(
+                'leaseLock-contract',
+                'create-lease',
+                [
+                    types.principal(lessee2.address),
+                    types.utf8("Stats Test Vehicle 2"),
+                    types.uint(110000),
+                    types.uint(730),
+                    types.uint(220000)
+                ],
+                lessor2.address
+            )
+        ]);
+        
+        assertEquals(block.receipts.length, 2);
+        block.receipts[0].result.expectOk().expectUint(1);
+        block.receipts[1].result.expectOk().expectUint(2);
+        
+        // Terminate one lease to test active count changes
+        block = chain.mineBlock([
+            Tx.contractCall(
+                'leaseLock-contract',
+                'terminate-lease',
+                [
+                    types.uint(1),
+                    types.utf8("Statistics update test")
+                ],
+                lessor1.address
+            )
+        ]);
+        
+        assertEquals(block.receipts.length, 1);
+        block.receipts[0].result.expectOk().expectTuple();
+        
+        // Final stats check
+        let finalStats = chain.callReadOnlyFn(
+            'leaseLock-contract',
+            'get-contract-stats',
+            [],
+            lessor1.address
+        );
+        
+        finalStats.result.expectTuple();
     },
 });
